@@ -24,6 +24,8 @@
 #include <sys/select.h>
 #include <bluetooth/bluetooth.h>
 #include <bluetooth/l2cap.h>
+#include <bluetooth/hci.h>
+#include <bluetooth/hci_lib.h>
 
 #include "ui.h"        // PrintAndLogEx
 #include "pm3_cmd.h"   // PM3_* (only for messaging parity; returns are 0/neg here)
@@ -50,6 +52,12 @@
 
 #define ATT_DEFAULT_MTU         23
 #define ATT_PREFERRED_MTU       517
+
+// Same 7.5–15 ms window the BWM requests. Units are 1.25 ms / 10 ms.
+#define BLE_CONN_ITVL_MIN       6
+#define BLE_CONN_ITVL_MAX       12
+#define BLE_CONN_LATENCY        0
+#define BLE_CONN_SUP_TIMEOUT    400
 
 // ---- small endian helpers ----
 static inline void put16(uint8_t *p, uint16_t v) { p[0] = v & 0xFF; p[1] = (v >> 8) & 0xFF; }
@@ -183,6 +191,74 @@ static int att_subscribe(int fd, uint16_t cccd_handle) {
     return (n >= 1) ? 0 : -1;
 }
 
+// BlueZ / the adapter pick a long interval by default (~400–500 ms on this
+// host). The BWM also asks for 7.5–15 ms; many centrals ignore a peripheral
+// request. Push the same window from our side via HCI LE Connection Update.
+static void ble_request_short_interval(int att_fd, const char *mac) {
+    struct l2cap_conninfo ci;
+    memset(&ci, 0, sizeof(ci));
+    socklen_t cilen = sizeof(ci);
+    if (getsockopt(att_fd, SOL_L2CAP, L2CAP_CONNINFO, &ci, &cilen) != 0) {
+        PrintAndLogEx(WARNING, "BLE: cannot read HCI handle (%s); leaving adapter interval", strerror(errno));
+        return;
+    }
+    uint16_t handle = ci.hci_handle & 0x0FFF;
+
+    bdaddr_t ba;
+    memset(&ba, 0, sizeof(ba));
+    str2ba(mac, &ba);
+    int dev_id = hci_get_route(&ba);
+    if (dev_id < 0) {
+        dev_id = hci_get_route(NULL);
+    }
+    if (dev_id < 0) {
+        PrintAndLogEx(WARNING, "BLE: no HCI adapter for conn update");
+        return;
+    }
+
+    int dd = hci_open_dev(dev_id);
+    if (dd < 0) {
+        PrintAndLogEx(WARNING, "BLE: cannot open HCI for conn update (%s)", strerror(errno));
+        return;
+    }
+
+    struct {
+        uint16_t handle;
+        uint16_t interval_min;
+        uint16_t interval_max;
+        uint16_t latency;
+        uint16_t supervision_timeout;
+        uint16_t min_ce_len;
+        uint16_t max_ce_len;
+    } __attribute__((packed)) cp = {
+        .handle              = htobs(handle),
+        .interval_min        = htobs(BLE_CONN_ITVL_MIN),
+        .interval_max        = htobs(BLE_CONN_ITVL_MAX),
+        .latency             = htobs(BLE_CONN_LATENCY),
+        .supervision_timeout = htobs(BLE_CONN_SUP_TIMEOUT),
+        .min_ce_len          = 0,
+        .max_ce_len          = htobs(0xFFFF),
+    };
+
+    struct hci_request rq;
+    memset(&rq, 0, sizeof(rq));
+    uint8_t status = 0;
+    rq.ogf    = OGF_LE_CTL;
+    rq.ocf    = OCF_LE_CONN_UPDATE;
+    rq.cparam = &cp;
+    rq.clen   = sizeof(cp);
+    rq.rparam = &status;
+    rq.rlen   = 1;
+
+    if (hci_send_req(dd, &rq, 1000) != 0 || status != 0) {
+        PrintAndLogEx(WARNING, "BLE: conn interval update failed (%s, status %u) — small ping will stay on the adapter default",
+                      strerror(errno), (unsigned)status);
+    } else {
+        PrintAndLogEx(SUCCESS, "BLE requested conn interval " _GREEN_("7.5-15") " ms");
+    }
+    hci_close_dev(dd);
+}
+
 int ble_connect(const char *mac, uint16_t chr_uuid16, ble_conn_t *conn) {
     memset(conn, 0, sizeof(*conn));
     conn->fd = -1;
@@ -221,6 +297,7 @@ int ble_connect(const char *mac, uint16_t chr_uuid16, ble_conn_t *conn) {
     }
 
     conn->fd = fd;
+    ble_request_short_interval(fd, mac);
 
     if (att_exchange_mtu(fd, &conn->mtu) != 0) {
         PrintAndLogEx(ERR, "BLE: ATT MTU exchange failed");
