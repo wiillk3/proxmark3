@@ -256,6 +256,7 @@ int ble_send(ble_conn_t *conn, const uint8_t *data, size_t len) {
     if (conn->fd < 0) return -1;
     size_t chunk = (conn->mtu > 3) ? (size_t)(conn->mtu - 3) : 20;
     uint8_t pdu[3 + 517];
+    unsigned burst = 0;
     for (size_t off = 0; off < len; off += chunk) {
         size_t clen = (len - off < chunk) ? (len - off) : chunk;
         pdu[0] = ATT_OP_WRITE_CMD;
@@ -263,6 +264,13 @@ int ble_send(ble_conn_t *conn, const uint8_t *data, size_t len) {
         memcpy(&pdu[3], data + off, clen);
         if (att_write_pdu(conn->fd, pdu, 3 + clen) != 0) {
             return -1;
+        }
+        // WRITE_CMD has no ATT-level flow control. A handful of full-MTU PDUs
+        // fills one 2M+DLE connection event; yield so the controller can empty
+        // instead of overrunning the BWM.
+        if (++burst >= 4) {
+            burst = 0;
+            usleep(7500);
         }
     }
     return 0;

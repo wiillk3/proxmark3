@@ -45,6 +45,7 @@ typedef struct {
 int ble_connect(const char *mac, uint16_t chr_uuid16, ble_conn_t *conn);
 
 // Send len bytes to the device, chunked to (mtu-3) as ATT Write Commands.
+// Bursts of 4 PDUs are paced (~7.5 ms) so WRITE_CMD cannot overrun the BWM.
 // Returns 0 on success, negative on error.
 int ble_send(ble_conn_t *conn, const uint8_t *data, size_t len);
 

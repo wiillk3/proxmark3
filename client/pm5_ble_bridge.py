@@ -138,9 +138,16 @@ class BleLink:
             if self.client is None or not self.client.is_connected:
                 break
             try:
+                burst = 0
                 for i in range(0, len(data), self.chunk):
                     await self.client.write_gatt_char(
                         self.chr, data[i:i + self.chunk], response=resp)
+                    # WRITE_CMD has no ATT flow control. 4 full-MTU PDUs fill one
+                    # 2M+DLE connection event; yield so the BWM can drain.
+                    burst += 1
+                    if burst >= 4:
+                        burst = 0
+                        await asyncio.sleep(0.0075)
             except Exception as e:
                 print(f"[bridge] BLE write error: {e}", file=sys.stderr, flush=True)
                 break
