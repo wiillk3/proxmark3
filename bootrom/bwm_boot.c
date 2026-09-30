@@ -13,8 +13,8 @@
 //
 // See LICENSE.txt for the text of the license.
 //-----------------------------------------------------------------------------
-// Polled UART4 + app_com unwrap. No DMA, no RX FIFO: one byte in the receive
-// register. Pump within one byte time (~10.8 us at 921600) or it is lost.
+// Polled UART4 + app_com unwrap. RX lands in a circular DMA ring, not the
+// one-byte receive register. Pump before the ring laps or it is lost.
 //-----------------------------------------------------------------------------
 
 #ifndef WITH_BWM_FORWARD
@@ -31,6 +31,7 @@
 #include "at32f435_437_crm.h"
 #include "at32f435_437_gpio.h"
 #include "at32f435_437_usart.h"
+#include "at32f435_437_dma.h"
 
 extern uint32_t start_addr, end_addr;
 
@@ -41,6 +42,14 @@ extern uint32_t start_addr, end_addr;
 #define BWM_UART_TX_SRC     GPIO_PINS_SOURCE0
 #define BWM_UART_RX_SRC     GPIO_PINS_SOURCE1
 #define BWM_UART_MUX        GPIO_MUX_8
+
+#define BWM_DMA_CHANNEL     DMA1_CHANNEL2
+#define BWM_DMA_MUX_CHANNEL DMA1MUX_CHANNEL2
+
+// Power of two. Must exceed one forward frame (<= 8 + BWM_FRAME_RX_MAX).
+#define BWM_RX_RING_SZ      2048
+static volatile uint8_t s_rx_ring[BWM_RX_RING_SZ];
+static uint16_t s_rx_tail;
 
 // ESP UART baud is not persistent. Probe both; 921600 is the OS target.
 static const uint32_t s_baud_candidates[] = { 921600u, 460800u };
@@ -109,6 +118,28 @@ static void uart_set_baud(uint32_t baud) {
     usart_parity_selection_config(BWM_UART, USART_PARITY_NONE);
     usart_transmitter_enable(BWM_UART, TRUE);
     usart_receiver_enable(BWM_UART, TRUE);
+
+    crm_periph_clock_enable(CRM_DMA1_PERIPH_CLOCK, TRUE);
+    s_rx_tail = 0;
+    dma_reset(BWM_DMA_CHANNEL);
+    dma_init_type dma_init_struct;
+    dma_default_para_init(&dma_init_struct);
+    dma_init_struct.buffer_size           = BWM_RX_RING_SZ;
+    dma_init_struct.direction             = DMA_DIR_PERIPHERAL_TO_MEMORY;
+    dma_init_struct.peripheral_base_addr  = (uint32_t) & (BWM_UART->dt);
+    dma_init_struct.peripheral_inc_enable = FALSE;
+    dma_init_struct.memory_base_addr      = (uint32_t)s_rx_ring;
+    dma_init_struct.memory_inc_enable     = TRUE;
+    dma_init_struct.peripheral_data_width = DMA_PERIPHERAL_DATA_WIDTH_BYTE;
+    dma_init_struct.memory_data_width     = DMA_MEMORY_DATA_WIDTH_BYTE;
+    dma_init_struct.loop_mode_enable      = TRUE;
+    dma_init_struct.priority              = DMA_PRIORITY_MEDIUM;
+    dma_init(BWM_DMA_CHANNEL, &dma_init_struct);
+    dmamux_enable(DMA1, TRUE);
+    dmamux_init(BWM_DMA_MUX_CHANNEL, DMAMUX_DMAREQ_ID_UART4_RX);
+    usart_dma_receiver_enable(BWM_UART, TRUE);
+    dma_channel_enable(BWM_DMA_CHANNEL, TRUE);
+
     usart_enable(BWM_UART, TRUE);
 }
 
@@ -118,10 +149,13 @@ static int uart_getc(uint8_t *b) {
         usart_flag_clear(BWM_UART, USART_ROERR_FLAG);
         return 0;
     }
-    if (usart_flag_get(BWM_UART, USART_RDBF_FLAG) == RESET) {
+    uint16_t head = (uint16_t)((BWM_RX_RING_SZ - dma_data_number_get(BWM_DMA_CHANNEL))
+                               & (BWM_RX_RING_SZ - 1));
+    if (s_rx_tail == head) {
         return 0;
     }
-    *b = (uint8_t)usart_data_receive(BWM_UART);
+    *b = s_rx_ring[s_rx_tail];
+    s_rx_tail = (uint16_t)((s_rx_tail + 1) & (BWM_RX_RING_SZ - 1));
     return 1;
 }
 

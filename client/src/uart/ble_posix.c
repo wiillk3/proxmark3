@@ -48,6 +48,8 @@
 #define ATT_OP_HANDLE_NOTIFY    0x1B
 #define ATT_OP_HANDLE_INDICATE  0x1D
 
+#define ATT_ECODE_REQ_NOT_SUPP  0x06
+
 // GATT attribute type UUIDs
 #define GATT_CHARACTERISTIC     0x2803
 #define GATT_CCCD               0x2902
@@ -79,6 +81,33 @@ static int att_read_pdu(int fd, uint8_t *buf, size_t maxlen, int timeout_ms) {
     return (int)n;
 }
 
+// Answer a PDU the server started. Without a reply its ATT bearer times out
+// after 30 s and it drops the link (the BWM sends an MTU request on connect).
+// Returns true when `pdu` was one of those and has been handled.
+static bool att_handle_server_pdu(int fd, const uint8_t *pdu, int n) {
+    if (n < 1) return false;
+    uint8_t op = pdu[0];
+    if (op == ATT_OP_MTU_REQ) {
+        uint8_t rsp[3] = { ATT_OP_MTU_RSP };
+        put16(&rsp[1], ATT_PREFERRED_MTU);
+        att_write_pdu(fd, rsp, sizeof(rsp));
+        return true;
+    }
+    // Any other request (odd opcodes are responses, bit 6 marks commands).
+    bool is_rsp = (op & 0x01) || (op == ATT_OP_ERROR);
+    bool is_cmd = (op & 0x40) != 0;
+    if (!is_rsp && !is_cmd && (op != ATT_OP_HANDLE_NOTIFY)) {
+        uint8_t err[5] = { ATT_OP_ERROR, op, 0, 0, ATT_ECODE_REQ_NOT_SUPP };
+        if (n >= 3) {
+            err[2] = pdu[1];
+            err[3] = pdu[2];
+        }
+        att_write_pdu(fd, err, sizeof(err));
+        return true;
+    }
+    return false;
+}
+
 // Send a request PDU and read PDUs until we get one starting with want_op (or an
 // ATT error). Notifications that arrive early are ignored here (discovery runs
 // before we subscribe, so none are expected). Returns rsp length or -1.
@@ -90,6 +119,7 @@ static int att_txn(int fd, const uint8_t *req, size_t reqlen, uint8_t want_op,
         if (n <= 0) return -1;
         if (rsp[0] == want_op) return n;
         if (rsp[0] == ATT_OP_ERROR) return -1;   // caller decides meaning
+        att_handle_server_pdu(fd, rsp, n);
         // ignore anything unexpected and keep reading
     }
     return -1;
@@ -525,6 +555,7 @@ int ble_recv(ble_conn_t *conn, uint8_t *buf, size_t maxlen, size_t *out_len, int
         int n = att_read_pdu(conn->fd, pdu, sizeof(pdu), timeout_ms);
         if (n < 0) { *out_len = got; return (got > 0) ? 0 : -1; }
         if (n == 0) break;                                  // real timeout / no more
+        if (att_handle_server_pdu(conn->fd, pdu, n)) continue;
         if ((pdu[0] != ATT_OP_HANDLE_NOTIFY && pdu[0] != ATT_OP_HANDLE_INDICATE) || n < 3)
             continue;                                       // ignore non-notifications
         if (get16(&pdu[1]) != conn->val_handle) continue;   // not our char

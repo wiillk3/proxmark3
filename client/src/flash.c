@@ -468,7 +468,8 @@ static bool port_is_wireless(const char *name) {
     }
     return (strncmp(name, "tcp:", 4) == 0) ||
            (strncmp(name, "udp:", 4) == 0) ||
-           (strncmp(name, "bt:", 3) == 0);
+           (strncmp(name, "bt:", 3) == 0) ||
+           (strncmp(name, "ble:", 4) == 0);
 }
 
 // Get the state of the proxmark, backwards compatible

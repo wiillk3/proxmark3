@@ -31,6 +31,9 @@
 #define BWM_TX_MAX_PAYLOAD (PM3_CMD_DATA_SIZE + 64)   // NG/OLD frame ceiling
 #define BWM_TX_BUFSZ      (BWM_TX_OVERHEAD + BWM_TX_MAX_PAYLOAD)
 
+// Longer than the BLE supervision timeout (420 ms): past that the link is gone.
+#define BWM_READ_IDLE_MS  500
+
 static void bwm_pump(void);   // fwd decl: TX gate pumps RX to collect forward-frame acks
 
 // --- Flow control (byte window) --------------------------------------------
@@ -176,20 +179,15 @@ uint32_t bwm_read_ng(uint8_t *data, size_t len) {
         return 0;
     }
 
-    // Same bounded-retry budget shape as bwm_uart_read(); USART_SLOW_LINK (set
-    // for the BWM/BLE link) widens it so a slow round-trip doesn't time out.
-    uint32_t tryconstant = 0;
-#ifdef USART_SLOW_LINK
-    tryconstant = 50000;
-#endif
-    uint32_t maxtry = 10 * (3000000 / BWM_UART_BAUD) + tryconstant;
-
+    // Bounded like bwm_uart_read(), but by idle time rather than a retry count
+    // so a slow round-trip doesn't time out: BLE hands a frame over one ATT
+    // write per connection event (~49 ms apart).
     uint32_t out = 0;
-    uint32_t try = 0;
+    uint32_t t0 = GetTickCount();
     while (out < len) {
         while (out < len && bwm_fifo_count() > 0) {
             data[out++] = bwm_fifo_pop();
-            try = 0;
+            t0 = GetTickCount();
         }
         if (out >= len) {
             break;
@@ -197,12 +195,12 @@ uint32_t bwm_read_ng(uint8_t *data, size_t len) {
         uint16_t before = bwm_fifo_count();
         bwm_pump();
         if (bwm_fifo_count() != before) {
-            try = 0;
+            t0 = GetTickCount();
             continue;
         }
-        if (try++ >= maxtry) {
-                break;
-            }
+        if (GetTickCountDelta(t0) > BWM_READ_IDLE_MS) {
+            break;
+        }
     }
     return out;
 }

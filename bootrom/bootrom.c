@@ -419,7 +419,7 @@ static void flash_mode(void) {
         WDT_HIT();
 
 #ifdef WITH_BWM_FORWARD
-        // Before the USB poll, not only after it: UART4 holds a single byte.
+        // Before the USB poll, not only after it: keep the UART4 DMA ring drained.
         bwm_boot_pump();
 #endif
 
@@ -442,8 +442,8 @@ static void flash_mode(void) {
 
         bool button_state = BUTTON_PRESS();
 #ifdef WITH_BWM_FORWARD
-        // UART4 holds one byte and has no DMA. A 10 ms sleep on every loop
-        // would shred an inbound DATA_FORWARD, so only debounce on a press.
+        // UART4 RX is a DMA ring, but a 10 ms sleep on every loop
+        // would stall an inbound DATA_FORWARD, so only debounce on a press.
         if (button_state) {
             SpinDelayUs(10000);
             button_state = BUTTON_PRESS();
