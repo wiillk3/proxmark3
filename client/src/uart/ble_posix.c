@@ -57,9 +57,8 @@
 #define ATT_DEFAULT_MTU         23
 #define ATT_PREFERRED_MTU       517
 
-// LE connection interval to ask for, in 1.25 ms units. Linux connects at ~49 ms,
-// which caps throughput at a few KB/s. Pinned at 7.5 ms: a 7.5-15 ms range let the
-// controller settle higher and flashing took ~45% longer.
+// LE connection interval to ask for, in 1.25 ms units (Linux connects at ~49 ms).
+// Fixed rather than a range: given one, the controller picked a slower interval.
 #define BLE_CONN_ITVL_MIN       6
 #define BLE_CONN_ITVL_MAX       6
 #define BLE_CONN_SUPERVISION    200     // 10 ms units

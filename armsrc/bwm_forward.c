@@ -31,7 +31,7 @@
 #define BWM_TX_MAX_PAYLOAD (PM3_CMD_DATA_SIZE + 64)   // NG/OLD frame ceiling
 #define BWM_TX_BUFSZ      (BWM_TX_OVERHEAD + BWM_TX_MAX_PAYLOAD)
 
-// Longer than the BLE supervision timeout (420 ms): past that the link is gone.
+// Max gap between parts of one frame; BLE delivers them a connection event apart.
 #define BWM_READ_IDLE_MS  500
 
 static void bwm_pump(void);   // fwd decl: TX gate pumps RX to collect forward-frame acks
@@ -180,8 +180,7 @@ uint32_t bwm_read_ng(uint8_t *data, size_t len) {
     }
 
     // Bounded like bwm_uart_read(), but by idle time rather than a retry count
-    // so a slow round-trip doesn't time out: BLE hands a frame over one ATT
-    // write per connection event (~49 ms apart).
+    // so a slow round-trip doesn't time out.
     uint32_t out = 0;
     uint32_t t0 = GetTickCount();
     while (out < len) {

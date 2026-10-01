@@ -559,6 +559,12 @@ static int enter_bootloader(char *serial_port_name, bool wait_appear) {
         }
         msleep(500);
         PrintAndLogEx(SUCCESS, _CYAN_("Trigger restart..."));
+        if (port_is_wireless(serial_port_name)) {
+            // The BWM keeps the link up across the PM5 reset; reconnecting can race BlueZ
+            // into dropping the new link mid-flash. get_proxmark_state() waits for the bootrom.
+            msleep(1000);
+            return PM3_SUCCESS;
+        }
         CloseProxmark(g_session.current_device);
         // Let time to OS to make the port disappear
         msleep(1000);
@@ -579,9 +585,9 @@ static int enter_bootloader(char *serial_port_name, bool wait_appear) {
 }
 
 // Wait for the device to respond with either ACK or NACK.
-static int wait_for_ack(PacketResponseNG *ack) {
+static int wait_for_ack(PacketResponseNG *ack, uint32_t timeout_ms) {
     // Timeout + skip stale replies (a lost byte can yield cmd 0x0000).
-    uint64_t deadline = msclock() + 15000;
+    uint64_t deadline = msclock() + timeout_ms;
     for (;;) {
         uint64_t now = msclock();
         if (now >= deadline) {
@@ -826,7 +832,7 @@ int flash_start_flashing(int enable_bl_writes, char *serial_port_name, flash_dev
             SendCommandBL(CMD_START_FLASH, start_flash_addr, flash_dev->flash_end, 0, NULL, 0);
         }
         PacketResponseNG resp;
-        return wait_for_ack(&resp);
+        return wait_for_ack(&resp, 15000);
     } else {
         PrintAndLogEx(ERR, _RED_("====================== OBS ! ========================================"));
         PrintAndLogEx(ERR, _RED_("Note: Your bootloader does not understand the new" _YELLOW_(" START_FLASH") _RED_(" command")));
@@ -966,7 +972,8 @@ static int write_block(uint32_t address, int magic, uint8_t *data, uint32_t leng
                 send_finish_write_cmd(address, magic, sent, block_buf + sent);
                 sent += PM3_CMD_DATA_SIZE_OLD;
             }
-            ret = wait_for_ack(&resp);
+            // A pipelined wireless ACK takes ~60 ms; one is lost now and then, so retry the block soon.
+            ret = wait_for_ack(&resp, flash_dev->pipeline ? 2000 : 15000);
             if (ret) {
                 if (ret == PM3_ETIMEOUT) {
                     PrintAndLogEx(WARNING, "No ACK at 0x%08x (packet %u), retrying block",
