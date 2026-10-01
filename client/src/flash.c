@@ -746,6 +746,14 @@ int flash_start_flashing(int enable_bl_writes, char *serial_port_name, flash_dev
         return PM3_EOPABORTED;
     }
 
+    // A BWM bootrom queues what it has not handled yet, so don't pay a wireless round trip per packet.
+    flash_dev->pipeline = port_is_wireless(serial_port_name) &&
+                          ((state & DEVICE_INFO_FLAG_UNDERSTANDS_BWM_STREAM) == DEVICE_INFO_FLAG_UNDERSTANDS_BWM_STREAM);
+    if (flash_dev->pipeline) {
+        // Several ACKs are in flight; the comms thread must keep reading after the first.
+        g_conn.block_after_ACK = false;
+    }
+
     flash_dev->chiptype = MAIN_CHIP_TYPE_NONE;
     if ((state & DEVICE_INFO_FLAG_UNDERSTANDS_CHIP_TYPE) == DEVICE_INFO_FLAG_UNDERSTANDS_CHIP_TYPE) {
         send_cmd_for_arg0(CMD_CHIP_TYPE, &flash_dev->chiptype);
@@ -894,10 +902,10 @@ static void flash_write_err_software(int pm3_err) {
     }
 }
 
-// Send finish write cmd and waiting for response.
+// Send finish write cmd. The caller waits for the response (wait_for_ack).
 // The send_buf length is always 512byte(PM3_CMD_DATA_SIZE_OLD)
 // block_off is the byte offset within the erase/write unit (unused on ICOPYX).
-static int send_finish_write_cmd(uint32_t address, int magic, uint32_t block_off, uint8_t *send_buf, PacketResponseNG *resp) {
+static void send_finish_write_cmd(uint32_t address, int magic, uint32_t block_off, uint8_t *send_buf) {
     // The sending length is always PM3_CMD_DATA_SIZE_OLD, which is 512 bytes, because of the limitation of the old frame.
     const int send_len = PM3_CMD_DATA_SIZE_OLD;
 #if defined ICOPYX
@@ -926,7 +934,6 @@ static int send_finish_write_cmd(uint32_t address, int magic, uint32_t block_off
     // arg[2] is the byte offset within the unit. Old bootroms ignore it; BWM bootroms place at arg[2]/4.
     SendCommandBL(CMD_FINISH_WRITE, address, magic, block_off, send_buf, send_len);
 #endif
-    return wait_for_ack(resp);
 }
 
 // Write a block of data to flash, padding to the block size if needed. The bootloader will read the entire block,
@@ -951,15 +958,21 @@ static int write_block(uint32_t address, int magic, uint8_t *data, uint32_t leng
     int ret = PM3_SUCCESS;
     for (int attempt = 0; attempt < 4; attempt++) {
         uint32_t sent = 0;
+        uint32_t acked = 0;
         ret = PM3_SUCCESS;
-        while (sent < aligned_len) {
+        while (acked < aligned_len) {
             PacketResponseNG resp;
-            ret = send_finish_write_cmd(address, magic, sent, block_buf + sent, &resp);
+            while ((sent < aligned_len) && ((sent == acked) || flash_dev->pipeline)) {
+                send_finish_write_cmd(address, magic, sent, block_buf + sent);
+                sent += PM3_CMD_DATA_SIZE_OLD;
+            }
+            ret = wait_for_ack(&resp);
             if (ret) {
                 if (ret == PM3_ETIMEOUT) {
                     PrintAndLogEx(WARNING, "No ACK at 0x%08x (packet %u), retrying block",
-                                  address, sent / PM3_CMD_DATA_SIZE_OLD);
+                                  address, acked / PM3_CMD_DATA_SIZE_OLD);
                     msleep(400);
+                    clearCommandBuffer(); // late ACKs of this attempt must not count for the next
                     break;
                 }
                 // On new version of flasher, the arg1 is error code of PM3_E*, old version is 0x00, so we can always check it.
@@ -978,9 +991,9 @@ static int write_block(uint32_t address, int magic, uint8_t *data, uint32_t leng
                 free(block_buf); // remember to free buffer
                 return ret;
             }
-            sent += PM3_CMD_DATA_SIZE_OLD;
+            acked += PM3_CMD_DATA_SIZE_OLD;
         }
-        if (ret == PM3_SUCCESS && sent >= aligned_len) {
+        if (ret == PM3_SUCCESS && acked >= aligned_len) {
             break;
         }
     }

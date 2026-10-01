@@ -83,7 +83,24 @@ static int reply_old(uint64_t cmd, uint64_t arg0, uint64_t arg1, uint64_t arg2, 
 
 #ifdef WITH_BWM_FORWARD
     if (g_pkt_from_bwm) {
-        return bwm_boot_write((uint8_t *)&txcmd, sizeof(PacketResponseOLD));
+        // A padded OLD frame is 544 B of BLE airtime for a few words. The client
+        // parses the MIX form the same way: NG header, the args, only real data.
+        uint8_t mix[sizeof(PacketResponseNGPreamble) + sizeof(txcmd.arg) + PM3_CMD_DATA_SIZE_OLD + sizeof(PacketResponseNGPostamble)];
+        size_t dlen = (data) ? len : 0;
+        PacketResponseNGPreamble *pre = (PacketResponseNGPreamble *)mix;
+        pre->magic = RESPONSENG_PREAMBLE_MAGIC;
+        pre->length = sizeof(txcmd.arg) + dlen;
+        pre->ng = false;
+        pre->status = PM3_SUCCESS;
+        pre->reason = 0;
+        pre->cmd = cmd;
+        size_t n = sizeof(PacketResponseNGPreamble);
+        for (size_t i = 0; i < sizeof(txcmd.arg) + dlen; i++) {
+            mix[n++] = ((uint8_t *)&txcmd.arg)[i];   // args, then d, are contiguous
+        }
+        mix[n++] = RESPONSENG_POSTAMBLE_MAGIC & 0xFF;
+        mix[n++] = RESPONSENG_POSTAMBLE_MAGIC >> 8;
+        return bwm_boot_write(mix, n);
     }
 #endif
     // Send frame and make sure all bytes are transmitted

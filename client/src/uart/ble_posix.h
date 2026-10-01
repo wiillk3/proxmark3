@@ -61,7 +61,8 @@ int ble_send(ble_conn_t *conn, const uint8_t *data, size_t len);
 // Receive up to maxlen payload bytes (drains leftover first, then waits up to
 // timeout_ms for notifications). *out_len set to bytes copied. Returns 0 on
 // success (including 0 bytes on timeout), negative on error/disconnect.
-int ble_recv(ble_conn_t *conn, uint8_t *buf, size_t maxlen, size_t *out_len, int timeout_ms);
+// wake_fd (or -1) ends a wait early while no byte is in hand, so a pending send goes out.
+int ble_recv(ble_conn_t *conn, uint8_t *buf, size_t maxlen, size_t *out_len, int timeout_ms, int wake_fd);
 
 void ble_close(ble_conn_t *conn);
 

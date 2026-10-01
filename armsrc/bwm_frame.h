@@ -59,10 +59,10 @@
 
 #ifdef AS_BOOTROM
 #ifndef BWM_FRAME_RX_MAX
-#define BWM_FRAME_RX_MAX  576
+#define BWM_FRAME_RX_MAX  4096            // ESP CMD_PAYLOAD_SIZE: TCP may merge a pipelined block into one frame
 #endif
 #ifndef BWM_FIFO_SZ
-#define BWM_FIFO_SZ       1024
+#define BWM_FIFO_SZ       8192            // a pipelined flash block (4 OLD cmds) queues here
 #endif
 #else
 #ifndef BWM_FRAME_RX_MAX

@@ -48,6 +48,7 @@ typedef struct {
     uint32_t flash_end;
     uint32_t boot_size; // Boot must be at the top of the flash, so flash_start is boot_start.
     uint32_t boot_end;
+    bool pipeline; // send a whole block before collecting its ACKs
 } flash_dev_t;
 
 int flash_reboot_bootloader(char *serial_port_name, bool wait_appear);

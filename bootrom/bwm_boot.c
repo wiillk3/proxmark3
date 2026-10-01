@@ -46,8 +46,8 @@ extern uint32_t start_addr, end_addr;
 #define BWM_DMA_CHANNEL     DMA1_CHANNEL2
 #define BWM_DMA_MUX_CHANNEL DMA1MUX_CHANNEL2
 
-// Power of two. Must exceed one forward frame (<= 8 + BWM_FRAME_RX_MAX).
-#define BWM_RX_RING_SZ      2048
+// Power of two. Must hold a pipelined flash block (4 forward frames) while we write flash.
+#define BWM_RX_RING_SZ      4096
 static volatile uint8_t s_rx_ring[BWM_RX_RING_SZ];
 static uint16_t s_rx_tail;
 

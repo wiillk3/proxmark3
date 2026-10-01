@@ -57,6 +57,13 @@
 #define ATT_DEFAULT_MTU         23
 #define ATT_PREFERRED_MTU       517
 
+// LE connection interval to ask for, in 1.25 ms units. Linux connects at ~49 ms,
+// which caps throughput at a few KB/s. Pinned at 7.5 ms: a 7.5-15 ms range let the
+// controller settle higher and flashing took ~45% longer.
+#define BLE_CONN_ITVL_MIN       6
+#define BLE_CONN_ITVL_MAX       6
+#define BLE_CONN_SUPERVISION    200     // 10 ms units
+
 // ---- small endian helpers ----
 static inline void put16(uint8_t *p, uint16_t v) { p[0] = v & 0xFF; p[1] = (v >> 8) & 0xFF; }
 static inline uint16_t get16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
@@ -415,6 +422,34 @@ int ble_resolve_name(const char *name, char *out_mac, size_t out_mac_sz, int tim
     return rc;
 }
 
+// As central we may set the interval ourselves. Needs CAP_NET_RAW for the HCI
+// socket; without it the link just stays at the kernel default.
+static void ble_request_fast_interval(int fd) {
+    struct l2cap_conninfo ci = {0};
+    socklen_t len = sizeof(ci);
+    struct sockaddr_l2 src = {0};
+    socklen_t slen = sizeof(src);
+    if (getsockopt(fd, SOL_L2CAP, L2CAP_CONNINFO, &ci, &len) < 0 ||
+            getsockname(fd, (struct sockaddr *)&src, &slen) < 0) {
+        return;
+    }
+    char addr[18];
+    ba2str(&src.l2_bdaddr, addr);
+    int dd = hci_open_dev(hci_devid(addr));
+    if (dd < 0) {
+        PrintAndLogEx(DEBUG, "BLE: keeping default connection interval (%s)", strerror(errno));
+        return;
+    }
+    if (hci_le_conn_update(dd, ci.hci_handle, BLE_CONN_ITVL_MIN, BLE_CONN_ITVL_MAX, 0,
+                           BLE_CONN_SUPERVISION, 1000) < 0) {
+        PrintAndLogEx(DEBUG, "BLE: connection interval update failed (%s)", strerror(errno));
+    } else {
+        PrintAndLogEx(DEBUG, "BLE: connection interval %.2f-%.2f ms",
+                      BLE_CONN_ITVL_MIN * 1.25, BLE_CONN_ITVL_MAX * 1.25);
+    }
+    hci_close_dev(dd);
+}
+
 // Retry the L2CAP connect briefly: a create-connection issued as an LE scan
 // tears down can be refused, and the peer may be between advertising events.
 #define BLE_CONNECT_TRIES        6
@@ -502,6 +537,8 @@ int ble_connect(const char *mac, uint16_t chr_uuid16, ble_conn_t *conn) {
         goto fail;
     }
 
+    ble_request_fast_interval(fd);
+
     PrintAndLogEx(SUCCESS, "BLE connected, MTU " _GREEN_("%u") ", char handle " _GREEN_("0x%04X"),
                   conn->mtu, conn->val_handle);
     return 0;
@@ -528,7 +565,7 @@ int ble_send(ble_conn_t *conn, const uint8_t *data, size_t len) {
     return 0;
 }
 
-int ble_recv(ble_conn_t *conn, uint8_t *buf, size_t maxlen, size_t *out_len, int timeout_ms) {
+int ble_recv(ble_conn_t *conn, uint8_t *buf, size_t maxlen, size_t *out_len, int timeout_ms, int wake_fd) {
     if (conn->fd < 0) return -1;
     size_t got = 0;
 
@@ -552,6 +589,21 @@ int ble_recv(ble_conn_t *conn, uint8_t *buf, size_t maxlen, size_t *out_len, int
     // frames still return immediately.
     uint8_t pdu[3 + 517];
     for (;;) {
+        if ((got == 0) && (wake_fd >= 0)) {
+            fd_set rfds;
+            FD_ZERO(&rfds);
+            FD_SET(conn->fd, &rfds);
+            FD_SET(wake_fd, &rfds);
+            struct timeval tv = { .tv_sec = timeout_ms / 1000, .tv_usec = (timeout_ms % 1000) * 1000 };
+            int maxfd = (conn->fd > wake_fd) ? conn->fd : wake_fd;
+            int r = select(maxfd + 1, &rfds, NULL, NULL, &tv);
+            if (r == 0) break;                              // real timeout
+            if ((r > 0) && FD_ISSET(wake_fd, &rfds)) {
+                uint8_t drain[64];
+                while (read(wake_fd, drain, sizeof(drain)) > 0) { };
+                if (FD_ISSET(conn->fd, &rfds) == false) break;
+            }
+        }
         int n = att_read_pdu(conn->fd, pdu, sizeof(pdu), timeout_ms);
         if (n < 0) { *out_len = got; return (got > 0) ? 0 : -1; }
         if (n == 0) break;                                  // real timeout / no more
